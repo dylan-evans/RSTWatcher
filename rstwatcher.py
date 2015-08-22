@@ -17,26 +17,7 @@ def main(params):
     """
     app = QtGui.QApplication(sys.argv)
 
-    win = QtGui.QMainWindow()
-    win.setWindowTitle("RST Viewer")
-
-    widgydidge = QtGui.QWidget()
-    vbox = QtGui.QVBoxLayout()
-    widgydidge.setLayout(vbox)
-    win.setCentralWidget(widgydidge)
-
-    monitor = SourceMonitor(params.filename, QtWebKit.QWebView())
-    monitor.start()
-    vbox.addWidget(monitor._webview)
-
-    tools = QtGui.QToolBar()
-    tools.show()
-    tools.addAction("Open", monitor.open_file)
-    vbox.addWidget(tools)
-    # TODO: Add button for opening a file.
-    # TODO: Add status widget (assuming the toolbar allows that)
-
-    win.show()
+    view = Viewer(params.filename)
     return app.exec_()
 
 
@@ -44,77 +25,126 @@ def parse_args(params=sys.argv[1:]):
     parser = ArgumentParser(description="A long long time ago...")
     parser.add_argument("filename", nargs="?", default="demo.rst",
                         help="reStructuredText file")
-    parser.add_argument("--interval", "-i", type=int, default=200,
+    parser.add_argument("--interval", "-i", type=int, default=250,
                         help="Milliseconds between checking the file")
 
     return parser.parse_args(params)
 
 
-class SourceMonitor(object):
-    """
-    Monitor an rst source file and load it into the web view.
-    """
-    def __init__(self, filename, webview, interval=200):
-        self._filename = filename
-        self._webview = webview
-        self._cur_mtime = None
-        self._timer = None
-        self._interval = interval
-        self.load()
+class Viewer(QtGui.QWidget):
+    TITLE = "RST Watcher"
 
-        # Setup the timer, it still needs to be started.
-        self._timer = QtCore.QTimer()
-        self._timer.setSingleShot(False)
-        self._timer.setInterval(self._interval)
-        self._timer.timeout.connect(self.reload_if_modified)
+    FILE_FMT = '<span style="color: #11c031; font-weight: bold">{}</span>'
+
+    def __init__(self, filename, *args, **kwargs):
+        super(Viewer, self).__init__(*args, **kwargs)
+        self.monitor = FileMonitor(filename)
+        self.toolbar = QtGui.QToolBar(self)
+        self.webview = QtWebKit.QWebView(self)
+        self._filename_label = QtGui.QLabel("")
+
+        # Bind the monitor to reload the file.
+        self.monitor.changed.connect(self._load_file)
+
+        self.setWindowTitle(self.TITLE)
+        vbox = QtGui.QVBoxLayout()
+        self.setLayout(vbox)
+
+        self.webview.show()
+        vbox.addWidget(self.toolbar)
+
+        vbox.addWidget(self.webview)
+
+        self._setup_toolbar()
+        self._load_file()
+        self.toolbar.show()
+        self.webview.show()
+        self.show()
+
+    def _setup_toolbar(self):
+        """
+        Put actions in the toolbar.
+        """
+        self.toolbar.addAction("Open", self._open_file)
+        self.toolbar.addSeparator()
+        self.toolbar.addWidget(self._filename_label)
+
+    def _load_file(self):
+        """
+        Load the file currently being monitored.
+        """
+        if not self.monitor.filename:
+            self._filename_label.setText("")
+            self.webview.setHtml("")
+        else:
+            self.monitor.mark_current()
+            self._filename_label.setText(
+                self.FILE_FMT.format(os.path.split(self.monitor.filename)[1])
+            )
+            self._filename_label.repaint()
+            with open(self.monitor.filename) as src:
+                self.webview.setHtml(publish_string(src.read(),
+                                                    writer_name="html"))
+
+    def _open_file(self):
+        """
+        Show the open file dialog.
+        """
+        self.monitor.filename = QtGui.QFileDialog.getOpenFileName()[0]
+        self._load_file()
+
+
+class FileMonitor(QtCore.QObject):
+    """
+    Emits a signal when a file is modified.
+    """
+    changed = QtCore.Signal()
+
+    def __init__(self, filename, interval=250, *args, **kwargs):
+        super(FileMonitor, self).__init__(*args, **kwargs)
+        self._prev_mtime = None
+        self._filename = None
+        self.timer = QtCore.QTimer()
+        self.timer.setSingleShot(False)
+        self.timer.setInterval(interval)
+        self.timer.timeout.connect(self.check)
+        self.filename = filename
 
     @property
     def filename(self):
+        """
+        Get the current filename.
+        """
         return self._filename
 
     @filename.setter
-    def filename(self, name):
-        # TODO: Check if the file exists and display an error if it doesn't
-        if not name:
-            self._webview.setHtml("")
-        self._filename = name
-        # TODO: Show the filename in the toolbar.
-        self.load()
-
-    def load(self):
+    def filename(self, value):
         """
-        Read the file, process it with docutils and update the web view.
+        Set the filename. If value is None then the time will be stopped.
         """
-        with open(self._filename) as src:
-            self._webview.setHtml(publish_string(src.read(), writer_name="html"))
-        self._cur_mtime = os.stat(self._filename).st_mtime
-        self._webview.show()
+        self.timer.stop()
+        if value:
+            self._filename = value
+            self.mark_current()
+            self.timer.start()
 
-    def modified(self):
+    @property
+    def current_mtime(self):
+        return os.stat(self._filename).st_mtime
+
+    def mark_current(self):
         """
-        Check if the file has been modified since it was last read.
-        :return: True or False.
+        Updates the saved modified time to the current modified time.
         """
-        print self.filename
-        mtime = os.stat(self._filename).st_mtime
-        return not self._cur_mtime or self._cur_mtime < mtime
+        self._prev_mtime = self.current_mtime
 
-    def reload_if_modified(self):
+    def check(self):
         """
-        Refresh the web view if the file has been modified.
+        Check if the file has been modified, if it has than emits
+        a changed signal.
         """
-        if self.modified():
-            self.load()
-
-    def start(self):
-        self._timer.start()
-
-    def stop(self):
-        self._timer.stop()
-
-
-    def open_file(self):
-        self.filename = QtGui.QFileDialog.getOpenFileName()[0]
+        if self._prev_mtime < self.current_mtime:
+            self.changed.emit()
 
 
 if __name__ == "__main__":
