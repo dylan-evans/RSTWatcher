@@ -47,12 +47,10 @@ class Viewer(QtGui.QWidget):
         self.monitor.changed.connect(self._load_file)
 
         self.setWindowTitle(self.TITLE)
+
         vbox = QtGui.QVBoxLayout()
         self.setLayout(vbox)
-
-        self.webview.show()
         vbox.addWidget(self.toolbar)
-
         vbox.addWidget(self.webview)
 
         self._setup_toolbar()
